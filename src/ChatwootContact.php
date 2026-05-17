@@ -48,7 +48,10 @@ final readonly class ChatwootContact
 
     public function hasLookupKey(): bool
     {
-        return $this->phone !== '' || $this->email !== '';
+        return $this->phone !== ''
+            || $this->email !== ''
+            || $this->id !== null
+            || $this->name !== '';
     }
 
     /**

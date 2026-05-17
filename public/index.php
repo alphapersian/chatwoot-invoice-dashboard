@@ -77,8 +77,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $isChatwoot = ($_POST['source'] ?? '') === 'chatwoot';
 
         if ($isChatwoot) {
-            if ($input['phone'] === '' && $input['email'] === '') {
-                throw new InvalidArgumentException('Chatwoot contact has no phone or email.');
+            $chatwootId = trim((string) ($_POST['chatwoot_contact_id'] ?? ''));
+            if ($input['phone'] === '' && $input['email'] === '' && $chatwootId === '' && $input['client_name'] === '') {
+                throw new InvalidArgumentException(
+                    'Chatwoot contact has no usable details. Add a name, phone, or email in Chatwoot.'
+                );
             }
         } elseif ($input['phone'] === '') {
             throw new InvalidArgumentException('Phone number is required.');

@@ -229,15 +229,17 @@
 
     const phone = contact.phone_number || contact.phone || '';
     const email = contact.email || '';
-    if (!phone && !email) {
-      setStatus('Contact has no phone or email in Chatwoot.', 'error');
+    const name = contact.name || '';
+    const contactId = contact.id != null ? String(contact.id) : '';
+    if (!phone && !email && !name && !contactId) {
+      setStatus('Contact has no name, phone, or email in Chatwoot.', 'error');
       if (newBtn) {
         newBtn.disabled = true;
       }
       return;
     }
 
-    setStatus('Loading invoices…', 'loading');
+    setStatus('Syncing client…', 'loading');
     if (newBtn) {
       newBtn.disabled = true;
     }
@@ -245,7 +247,12 @@
     try {
       const result = await syncToInvoiceNinja(contact);
       renderInvoices(result.invoices);
-      setStatus('', '');
+      if (result.created) {
+        const clientName = result.client?.name || name || 'Client';
+        setStatus(`Created Invoice Ninja client: ${clientName}`, 'success');
+      } else {
+        setStatus('', '');
+      }
       if (newBtn) {
         newBtn.disabled = false;
       }

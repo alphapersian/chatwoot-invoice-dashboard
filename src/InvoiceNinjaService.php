@@ -98,8 +98,17 @@ final class InvoiceNinjaService
         $name = trim((string) $name);
         $email = trim((string) $email);
 
-        if ($phone === '' && $email === '') {
-            throw new \InvalidArgumentException('Contact must have a phone number or email.');
+        if ($phone === '' && $email === '' && $chatwootContactId === null && $name === '') {
+            throw new \InvalidArgumentException(
+                'Contact must have a phone number, email, Chatwoot id, or name.'
+            );
+        }
+
+        if ($chatwootContactId !== null) {
+            $byChatwoot = $this->findClientByChatwootContactId($chatwootContactId);
+            if ($byChatwoot !== null) {
+                return $byChatwoot;
+            }
         }
 
         if ($phone !== '') {
@@ -131,8 +140,15 @@ final class InvoiceNinjaService
     {
         if (!$contact->hasLookupKey()) {
             throw new \InvalidArgumentException(
-                'This Chatwoot contact has no phone number or email. Add one in Chatwoot first.'
+                'This Chatwoot contact has no usable details. Add a name, phone, or email in Chatwoot.'
             );
+        }
+
+        if ($contact->id !== null) {
+            $byChatwoot = $this->findClientByChatwootContactId($contact->id);
+            if ($byChatwoot !== null) {
+                return $byChatwoot;
+            }
         }
 
         return $this->ensureClient(
@@ -141,6 +157,32 @@ final class InvoiceNinjaService
             $contact->email !== '' ? $contact->email : null,
             $contact->id,
         );
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    public function findClientByChatwootContactId(int $chatwootContactId): ?array
+    {
+        if ($chatwootContactId <= 0) {
+            return null;
+        }
+
+        $marker = self::chatwootContactMarker($chatwootContactId);
+
+        $response = $this->ninja->clients->all([
+            'filter' => $marker,
+            'include' => 'contacts',
+            'per_page' => 20,
+        ]);
+
+        foreach ($response['data'] ?? [] as $client) {
+            if (self::clientHasChatwootMarker($client, $chatwootContactId)) {
+                return $client;
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -379,11 +421,20 @@ final class InvoiceNinjaService
      */
     public function syncChatwootContact(ChatwootContact $contact): array
     {
+        if (!$contact->hasLookupKey()) {
+            throw new \InvalidArgumentException(
+                'This Chatwoot contact has no usable details. Add a name, phone, or email in Chatwoot.'
+            );
+        }
+
         $phone = $contact->phone;
         $email = $contact->email;
 
         $existing = null;
-        if ($phone !== '') {
+        if ($contact->id !== null) {
+            $existing = $this->findClientByChatwootContactId($contact->id);
+        }
+        if ($existing === null && $phone !== '') {
             $byPhone = $this->findClientsByPhone($phone);
             if (count($byPhone) === 1) {
                 $existing = $byPhone[0];
@@ -399,6 +450,8 @@ final class InvoiceNinjaService
         if ($existing === null) {
             $existing = $this->ensureClientFromChatwoot($contact);
             $created = true;
+        } elseif ($contact->id !== null && !self::clientHasChatwootMarker($existing, $contact->id)) {
+            $existing = $this->tagClientWithChatwootId($existing, $contact->id);
         }
 
         $clientId = (string) ($existing['id'] ?? '');
@@ -413,13 +466,33 @@ final class InvoiceNinjaService
     /**
      * @return array<string, mixed>
      */
+    /**
+     * @param array<string, mixed> $client
+     * @return array<string, mixed>
+     */
+    private function tagClientWithChatwootId(array $client, int $chatwootContactId): array
+    {
+        $clientId = (string) ($client['id'] ?? '');
+        if ($clientId === '') {
+            return $client;
+        }
+
+        $response = $this->ninja->clients->update($clientId, [
+            'custom_value1' => self::chatwootContactMarker($chatwootContactId),
+        ]);
+
+        return $response['data'] ?? $response;
+    }
+
     private function createClient(
         string $phone,
         ?string $name,
         ?string $email,
         ?int $chatwootContactId = null,
     ): array {
-        $displayName = $name !== '' ? $name : ($email !== '' ? $email : ($phone !== '' ? 'Client ' . $phone : 'Chatwoot contact'));
+        $displayName = $name !== '' ? $name : ($email !== '' ? $email : ($phone !== '' ? 'Client ' . $phone : (
+            $chatwootContactId !== null ? 'Chatwoot contact #' . $chatwootContactId : 'Chatwoot contact'
+        )));
 
         $contactEmail = $email !== ''
             ? $email
@@ -446,10 +519,23 @@ final class InvoiceNinjaService
         }
 
         if ($chatwootContactId !== null) {
-            $payload['custom_value1'] = 'chatwoot_contact_id:' . $chatwootContactId;
+            $payload['custom_value1'] = self::chatwootContactMarker($chatwootContactId);
         }
 
         return $this->ninja->clients->create($payload);
+    }
+
+    private static function chatwootContactMarker(int $chatwootContactId): string
+    {
+        return 'chatwoot_contact_id:' . $chatwootContactId;
+    }
+
+    /**
+     * @param array<string, mixed> $client
+     */
+    private static function clientHasChatwootMarker(array $client, int $chatwootContactId): bool
+    {
+        return trim((string) ($client['custom_value1'] ?? '')) === self::chatwootContactMarker($chatwootContactId);
     }
 
     private function clientMatchesPhone(array $client, string $needle): bool

@@ -37,7 +37,7 @@ try {
     $contact = ChatwootContact::fromArray($contactData);
     if (!$contact->hasLookupKey()) {
         throw new InvalidArgumentException(
-            'Chatwoot contact has no phone or email. Add contact details in Chatwoot.'
+            'Chatwoot contact has no usable details. Add a name, phone, or email in Chatwoot.'
         );
     }
 

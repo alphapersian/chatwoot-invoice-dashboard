@@ -263,9 +263,18 @@ tr:last-child td { border-bottom: none; }
 
 .field-actions label { visibility: hidden; }
 
+.embed-chatwoot {
+    min-height: 320px;
+}
+
 .embed-chatwoot .page {
     max-width: 100%;
     padding: 1rem 0.75rem 2rem;
+    min-height: 280px;
+}
+
+#chatwoot-status:not([hidden]) {
+    margin-bottom: 0.75rem;
 }
 
 .embed-chatwoot header h1 {

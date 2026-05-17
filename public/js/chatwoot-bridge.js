@@ -1,7 +1,13 @@
 (() => {
   const params = new URLSearchParams(window.location.search);
   const forceChatwoot = params.get('chatwoot') === '1';
-  const isEmbed = window.self !== window.top;
+
+  let isEmbed = false;
+  try {
+    isEmbed = window.self !== window.top;
+  } catch {
+    isEmbed = true;
+  }
 
   if (!isEmbed && !forceChatwoot) {
     return;
@@ -56,14 +62,27 @@
   };
 
   let currentContact = null;
+  let contextReceived = false;
+
+  const showEmbedUi = () => {
+    if (chatwootApp) {
+      chatwootApp.hidden = false;
+    }
+  };
 
   const setStatus = (text, type = 'loading') => {
     if (!els.status) {
       return;
     }
+    if (!text) {
+      els.status.hidden = true;
+      els.status.textContent = '';
+      return;
+    }
+    els.status.hidden = false;
     els.status.textContent = text;
     els.status.className = `chatwoot-status chatwoot-status--${type}`;
-    els.status.hidden = text === '';
+    showEmbedUi();
   };
 
   const setFormAlert = (text, type = 'error') => {
@@ -81,9 +100,7 @@
   };
 
   const showHome = () => {
-    if (chatwootApp) {
-      chatwootApp.hidden = false;
-    }
+    showEmbedUi();
     if (form) {
       form.hidden = true;
     }
@@ -214,10 +231,22 @@
     }
   }
 
+  function contactHasDetails(contact) {
+    if (!contact) {
+      return false;
+    }
+    const phone = contact.phone_number || contact.phone || '';
+    const email = contact.email || '';
+    const name = contact.name || '';
+    const contactId = contact.id != null ? String(contact.id) : '';
+    return Boolean(phone || email || name || contactId);
+  }
+
   async function onContact(contact) {
     currentContact = contact;
+    contextReceived = true;
 
-    if (!contact) {
+    if (!contactHasDetails(contact)) {
       setStatus('No contact in this conversation.', 'error');
       if (newBtn) {
         newBtn.disabled = true;
@@ -230,14 +259,6 @@
     const phone = contact.phone_number || contact.phone || '';
     const email = contact.email || '';
     const name = contact.name || '';
-    const contactId = contact.id != null ? String(contact.id) : '';
-    if (!phone && !email && !name && !contactId) {
-      setStatus('Contact has no name, phone, or email in Chatwoot.', 'error');
-      if (newBtn) {
-        newBtn.disabled = true;
-      }
-      return;
-    }
 
     setStatus('Syncing client…', 'loading');
     if (newBtn) {
@@ -255,9 +276,6 @@
       }
       if (newBtn) {
         newBtn.disabled = false;
-      }
-      if (chatwootApp) {
-        chatwootApp.hidden = false;
       }
       showHome();
     } catch (err) {
@@ -281,10 +299,15 @@
     createInvoice();
   });
 
-  function parseMessage(data) {
+  function parseMessage(raw) {
+    let data = raw;
     if (typeof data === 'string') {
+      const trimmed = data.trim();
+      if (trimmed === '' || trimmed === 'chatwoot-dashboard-app:fetch-info') {
+        return null;
+      }
       try {
-        data = JSON.parse(data);
+        data = JSON.parse(trimmed);
       } catch {
         return null;
       }
@@ -292,11 +315,15 @@
     if (!data || typeof data !== 'object') {
       return null;
     }
+
     if (data.event === 'appContext' && data.data) {
       return data.data;
     }
     if (data.data?.contact || data.data?.conversation) {
       return data.data;
+    }
+    if (data.contact || data.conversation) {
+      return data;
     }
     return null;
   }
@@ -305,21 +332,64 @@
     if (!context) {
       return null;
     }
-    if (context.contact) {
-      return context.contact;
+
+    const sender = context.conversation?.meta?.sender ?? null;
+    const contact = context.contact ?? null;
+
+    if (contactHasDetails(contact)) {
+      return contact;
     }
-    return context.conversation?.meta?.sender ?? null;
+    if (contactHasDetails(sender)) {
+      return sender;
+    }
+
+    return contact || sender || null;
   }
 
-  window.addEventListener('message', (event) => {
-    const context = parseMessage(event.data);
+  function handleAppContext(raw) {
+    const context = parseMessage(raw);
+    if (!context) {
+      return;
+    }
     const contact = extractContact(context);
     if (contact) {
       onContact(contact);
     }
+  }
+
+  function requestChatwootContext() {
+    if (window.parent !== window) {
+      window.parent.postMessage('chatwoot-dashboard-app:fetch-info', '*');
+    }
+  }
+
+  window.addEventListener('message', (event) => {
+    handleAppContext(event.data);
   });
 
-  if (window.parent !== window) {
-    window.parent.postMessage('chatwoot-dashboard-app:fetch-info', '*');
-  }
+  // Show UI immediately — Chatwoot only renders the iframe after the tab is opened.
+  setStatus('Loading contact from Chatwoot…', 'loading');
+  renderInvoices([]);
+
+  requestChatwootContext();
+  [250, 750, 1500, 3000, 5000].forEach((ms) => {
+    setTimeout(requestChatwootContext, ms);
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      requestChatwootContext();
+    }
+  });
+
+  window.addEventListener('focus', requestChatwootContext);
+
+  setTimeout(() => {
+    if (!contextReceived) {
+      setStatus(
+        'Still waiting for Chatwoot. Open a conversation, then click this app tab again.',
+        'error'
+      );
+    }
+  }, 8000);
 })();

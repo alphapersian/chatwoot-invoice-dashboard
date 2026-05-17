@@ -152,8 +152,9 @@ $itemsJson = json_encode($input['items'], JSON_HEX_TAG | JSON_HEX_APOS | JSON_HE
         <?php endif; ?>
         </div>
 
+        <p id="chatwoot-status" class="chatwoot-status chatwoot-status--loading" hidden>Loading contact from Chatwoot…</p>
+
         <div id="chatwoot-app" class="chatwoot-app" hidden>
-            <p id="chatwoot-status" class="chatwoot-status chatwoot-status--loading">Waiting for Chatwoot…</p>
             <section id="chatwoot-home" class="card chatwoot-home">
                 <div id="chatwoot-invoices-list" class="chatwoot-invoices-list"></div>
                 <div class="actions">

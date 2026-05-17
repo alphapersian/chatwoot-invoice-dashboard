@@ -1,11 +1,12 @@
-# Local smoke test: docker compose up --build
-# Coolify deploys from the Dockerfile directly (port 80, no compose required).
+# Used by Coolify (and local `docker compose up`).
+# Do NOT map host ports here — Coolify routes traffic to container port 80 via its proxy.
+# For local access on http://localhost:8080, use: docker compose -f docker-compose.local.yaml up --build
 
 services:
   app:
     build: .
-    ports:
-      - "${APP_PORT:-8080}:80"
+    expose:
+      - "80"
     env_file:
       - .env
     restart: unless-stopped

@@ -32,7 +32,6 @@ final class InvoiceNinjaService
             $local,
             self::normalizePhone($phone),
             strlen($local) >= 9 ? substr($local, -9) : null,
-            strlen($local) >= 7 ? substr($local, -7) : null,
         ])));
 
         $matches = [];
@@ -43,9 +42,13 @@ final class InvoiceNinjaService
                 'filter' => $term,
                 'include' => 'contacts',
                 'per_page' => 100,
+                'is_deleted' => false,
             ]);
 
             foreach ($response['data'] ?? [] as $client) {
+                if (!self::isClientActive($client)) {
+                    continue;
+                }
                 $id = (string) ($client['id'] ?? '');
                 if ($id !== '' && isset($seenIds[$id])) {
                     continue;
@@ -64,26 +67,68 @@ final class InvoiceNinjaService
     }
 
     /**
+     * Pick the best active client for a phone (exact match preferred, then most invoices).
+     *
+     * @param list<array<string, mixed>> $clients
+     * @return array<string, mixed>|null
+     */
+    public function pickBestClientForPhone(array $clients, string $phone): ?array
+    {
+        $active = array_values(array_filter($clients, static fn (array $c): bool => self::isClientActive($c)));
+        if ($active === []) {
+            return null;
+        }
+        if (count($active) === 1) {
+            return $active[0];
+        }
+
+        $best = null;
+        $bestScore = -1;
+
+        foreach ($active as $client) {
+            $score = $this->clientPhoneMatchScore($client, $phone);
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $best = $client;
+            }
+        }
+
+        return $best;
+    }
+
+    /**
+     * @param array<string, mixed> $client
+     */
+    public static function isClientActive(array $client): bool
+    {
+        if (!empty($client['is_deleted'])) {
+            return false;
+        }
+
+        $deletedAt = $client['deleted_at'] ?? 0;
+
+        return !is_numeric($deletedAt) || (int) $deletedAt <= 0;
+    }
+
+    /**
+     * @param array<string, mixed> $client
+     */
+    public function clientId(array $client): string
+    {
+        return trim((string) ($client['id'] ?? ''));
+    }
+
+    /**
      * @return list<array<string, mixed>>
      */
     public function listInvoicesByPhone(string $phone): array
     {
-        $clients = $this->findClientsByPhone($phone);
-        if ($clients === []) {
+        $client = $this->pickBestClientForPhone($this->findClientsByPhone($phone), $phone);
+        if ($client === null) {
             return [];
         }
 
-        $invoices = [];
-
-        foreach ($clients as $client) {
-            $clientId = (string) ($client['id'] ?? '');
-            if ($clientId === '') {
-                continue;
-            }
-            array_push($invoices, ...$this->listInvoicesByClientId($clientId));
-        }
-
-        return $invoices;
+        return $this->listInvoicesByClientId($this->clientId($client));
     }
 
     /**
@@ -115,15 +160,9 @@ final class InvoiceNinjaService
         }
 
         if ($phone !== '') {
-            $clients = $this->findClientsByPhone($phone);
-            if (count($clients) > 1) {
-                $ids = array_map(static fn (array $c): string => (string) ($c['id'] ?? ''), $clients);
-                throw new \RuntimeException(
-                    'Multiple Invoice Ninja clients share this phone. IDs: ' . implode(', ', $ids)
-                );
-            }
-            if ($clients !== []) {
-                return $clients[0];
+            $best = $this->pickBestClientForPhone($this->findClientsByPhone($phone), $phone);
+            if ($best !== null) {
+                return $best;
             }
         }
 
@@ -180,6 +219,9 @@ final class InvoiceNinjaService
         ]);
 
         foreach ($response['data'] ?? [] as $client) {
+            if (!self::isClientActive($client)) {
+                continue;
+            }
             if (self::clientHasChatwootMarker($client, $chatwootContactId)) {
                 return $client;
             }
@@ -205,6 +247,9 @@ final class InvoiceNinjaService
         ]);
 
         foreach ($response['data'] ?? [] as $client) {
+            if (!self::isClientActive($client)) {
+                continue;
+            }
             foreach ($client['contacts'] ?? [] as $contact) {
                 if (strcasecmp(trim((string) ($contact['email'] ?? '')), $email) === 0) {
                     return $client;
@@ -438,12 +483,7 @@ final class InvoiceNinjaService
             $existing = $this->findClientByChatwootContactId($contact->id);
         }
         if ($existing === null && $phone !== '') {
-            $byPhone = $this->findClientsByPhone($phone);
-            if (count($byPhone) === 1) {
-                $existing = $byPhone[0];
-            } elseif (count($byPhone) > 1) {
-                throw new \RuntimeException('Multiple Invoice Ninja clients match this phone number.');
-            }
+            $existing = $this->pickBestClientForPhone($this->findClientsByPhone($phone), $phone);
         }
         if ($existing === null && $email !== '') {
             $existing = $this->findClientByEmail($email);
@@ -457,7 +497,10 @@ final class InvoiceNinjaService
             $existing = $this->tagClientWithChatwootId($existing, $contact->id);
         }
 
-        $clientId = (string) ($existing['id'] ?? '');
+        $clientId = $this->clientId($existing);
+        if ($clientId === '' || !self::isClientActive($existing)) {
+            throw new \RuntimeException('Could not resolve an active Invoice Ninja client for this contact.');
+        }
 
         return [
             'client' => $existing,
@@ -580,9 +623,21 @@ final class InvoiceNinjaService
             return '';
         }
 
-        foreach (self::countryCallingCodes() as $code) {
+        if (str_contains($phone, '+')) {
+            foreach (self::countryCallingCodes() as $code) {
+                $codeLen = strlen($code);
+                if (str_starts_with($digits, $code) && strlen($digits) > $codeLen + 6) {
+                    return substr($digits, $codeLen);
+                }
+            }
+
+            return $digits;
+        }
+
+        // National format (no +): only strip country digits when length proves an embedded prefix.
+        foreach (self::nationalPrefixCountryCodes() as $code) {
             $codeLen = strlen($code);
-            if (str_starts_with($digits, $code) && strlen($digits) > $codeLen + 6) {
+            if (str_starts_with($digits, $code) && strlen($digits) >= $codeLen + 10) {
                 return substr($digits, $codeLen);
             }
         }
@@ -607,21 +662,58 @@ final class InvoiceNinjaService
         $localA = self::phoneWithoutCountryCode($phoneA);
         $localB = self::phoneWithoutCountryCode($phoneB);
 
-        if ($localA !== '' && $localB !== '' && $localA === $localB) {
-            return true;
+        return $localA !== '' && $localB !== '' && $localA === $localB;
+    }
+
+    /**
+     * @param array<string, mixed> $client
+     */
+    private function clientPhoneMatchScore(array $client, string $phone): int
+    {
+        $score = 0;
+        $inputNorm = self::normalizePhone($phone);
+        $inputLocal = self::phoneWithoutCountryCode($phone);
+
+        $phones = [];
+        $clientPhone = trim((string) ($client['phone'] ?? ''));
+        if ($clientPhone !== '') {
+            $phones[] = $clientPhone;
+        }
+        foreach ($client['contacts'] ?? [] as $contact) {
+            if (!is_array($contact)) {
+                continue;
+            }
+            $contactPhone = trim((string) ($contact['phone'] ?? ''));
+            if ($contactPhone !== '') {
+                $phones[] = $contactPhone;
+            }
         }
 
-        $minSuffix = 7;
-        if ($localA !== '' && $localB !== '' && strlen($localA) >= $minSuffix && strlen($localB) >= $minSuffix) {
-            if (str_ends_with($a, $localB) || str_ends_with($b, $localA)) {
-                return true;
+        foreach ($phones as $stored) {
+            if (self::normalizePhone($stored) === $inputNorm) {
+                $score += 100;
             }
-            if (str_ends_with($localA, $localB) || str_ends_with($localB, $localA)) {
-                return true;
+            if (self::phoneWithoutCountryCode($stored) === $inputLocal) {
+                $score += 50;
             }
         }
 
-        return false;
+        $clientId = $this->clientId($client);
+        if ($clientId !== '') {
+            $score += count($this->listInvoicesByClientId($clientId)) * 5;
+        }
+
+        return $score;
+    }
+
+    /**
+     * Country codes often stored without + on national numbers (98, 966, 964, …).
+     *
+     * @return list<string>
+     */
+    private static function nationalPrefixCountryCodes(): array
+    {
+        return ['966', '971', '973', '974', '965', '968', '964', '963', '962', '961', '98', '90', '20'];
     }
 
     /**

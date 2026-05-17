@@ -34,13 +34,9 @@ try {
     $client = null;
 
     if ($phone !== '') {
-        $clients = $service->findClientsByPhone($phone);
-        if (count($clients) > 1) {
-            throw new RuntimeException('Multiple clients match this phone number.');
-        }
-        if ($clients !== []) {
-            $client = $clients[0];
-            $invoices = $service->listInvoicesByClientId((string) ($client['id'] ?? ''));
+        $client = $service->pickBestClientForPhone($service->findClientsByPhone($phone), $phone);
+        if ($client !== null) {
+            $invoices = $service->listInvoicesByPhone($phone);
         }
     }
 

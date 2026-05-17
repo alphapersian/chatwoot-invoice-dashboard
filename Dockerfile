@@ -18,7 +18,7 @@ COPY public ./public
 
 RUN composer dump-autoload --optimize --classmap-authoritative
 
-FROM php:8.3-apache-bookworm
+FROM php:8.4-apache-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \

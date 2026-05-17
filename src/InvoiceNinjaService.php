@@ -23,37 +23,40 @@ final class InvoiceNinjaService
      */
     public function findClientsByPhone(string $phone): array
     {
-        $needle = self::normalizePhone($phone);
-        if ($needle === '') {
+        if (self::normalizePhone($phone) === '') {
             throw new \InvalidArgumentException('Phone number is empty or invalid.');
         }
 
-        $response = $this->ninja->clients->all([
-            'filter' => $phone,
-            'include' => 'contacts',
-            'per_page' => 100,
-        ]);
+        $local = self::phoneWithoutCountryCode($phone);
+        $searchTerms = array_values(array_unique(array_filter([
+            $local,
+            self::normalizePhone($phone),
+            strlen($local) >= 9 ? substr($local, -9) : null,
+            strlen($local) >= 7 ? substr($local, -7) : null,
+        ])));
 
-        $clients = $response['data'] ?? [];
         $matches = [];
+        $seenIds = [];
 
-        foreach ($clients as $client) {
-            if ($this->clientMatchesPhone($client, $needle)) {
-                $matches[] = $client;
-            }
-        }
-
-        // If filter did not return exact phone hits, scan a broader list (e.g. partial filter miss).
-        if ($matches === [] && ($response['meta']['pagination']['total'] ?? 0) === 0) {
+        foreach ($searchTerms as $term) {
             $response = $this->ninja->clients->all([
+                'filter' => $term,
                 'include' => 'contacts',
                 'per_page' => 100,
             ]);
 
             foreach ($response['data'] ?? [] as $client) {
-                if ($this->clientMatchesPhone($client, $needle)) {
-                    $matches[] = $client;
+                $id = (string) ($client['id'] ?? '');
+                if ($id !== '' && isset($seenIds[$id])) {
+                    continue;
                 }
+                if (!$this->clientMatchesPhone($client, $phone)) {
+                    continue;
+                }
+                if ($id !== '') {
+                    $seenIds[$id] = true;
+                }
+                $matches[] = $client;
             }
         }
 
@@ -464,9 +467,6 @@ final class InvoiceNinjaService
     }
 
     /**
-     * @return array<string, mixed>
-     */
-    /**
      * @param array<string, mixed> $client
      * @return array<string, mixed>
      */
@@ -538,16 +538,26 @@ final class InvoiceNinjaService
         return trim((string) ($client['custom_value1'] ?? '')) === self::chatwootContactMarker($chatwootContactId);
     }
 
-    private function clientMatchesPhone(array $client, string $needle): bool
+    private function clientMatchesPhone(array $client, string $inputPhone): bool
     {
-        $clientPhone = self::normalizePhone((string) ($client['phone'] ?? ''));
-        if ($clientPhone !== '' && ($clientPhone === $needle || str_contains($clientPhone, $needle) || str_contains($needle, $clientPhone))) {
-            return true;
+        $phones = [];
+        $clientPhone = trim((string) ($client['phone'] ?? ''));
+        if ($clientPhone !== '') {
+            $phones[] = $clientPhone;
         }
 
         foreach ($client['contacts'] ?? [] as $contact) {
-            $contactPhone = self::normalizePhone((string) ($contact['phone'] ?? ''));
-            if ($contactPhone !== '' && ($contactPhone === $needle || str_contains($contactPhone, $needle) || str_contains($needle, $contactPhone))) {
+            if (!is_array($contact)) {
+                continue;
+            }
+            $contactPhone = trim((string) ($contact['phone'] ?? ''));
+            if ($contactPhone !== '') {
+                $phones[] = $contactPhone;
+            }
+        }
+
+        foreach ($phones as $stored) {
+            if (self::phonesMatch($stored, $inputPhone)) {
                 return true;
             }
         }
@@ -558,6 +568,94 @@ final class InvoiceNinjaService
     public static function normalizePhone(string $phone): string
     {
         return preg_replace('/\D+/', '', $phone) ?? '';
+    }
+
+    /**
+     * Digits-only local number (no country code, no leading trunk 0).
+     */
+    public static function phoneWithoutCountryCode(string $phone): string
+    {
+        $digits = ltrim(self::normalizePhone($phone), '0');
+        if ($digits === '') {
+            return '';
+        }
+
+        foreach (self::countryCallingCodes() as $code) {
+            $codeLen = strlen($code);
+            if (str_starts_with($digits, $code) && strlen($digits) > $codeLen + 6) {
+                return substr($digits, $codeLen);
+            }
+        }
+
+        return $digits;
+    }
+
+    /**
+     * True when both numbers share the same local part (country code ignored).
+     */
+    public static function phonesMatch(string $phoneA, string $phoneB): bool
+    {
+        $a = self::normalizePhone($phoneA);
+        $b = self::normalizePhone($phoneB);
+        if ($a === '' || $b === '') {
+            return false;
+        }
+        if ($a === $b) {
+            return true;
+        }
+
+        $localA = self::phoneWithoutCountryCode($phoneA);
+        $localB = self::phoneWithoutCountryCode($phoneB);
+
+        if ($localA !== '' && $localB !== '' && $localA === $localB) {
+            return true;
+        }
+
+        $minSuffix = 7;
+        if ($localA !== '' && $localB !== '' && strlen($localA) >= $minSuffix && strlen($localB) >= $minSuffix) {
+            if (str_ends_with($a, $localB) || str_ends_with($b, $localA)) {
+                return true;
+            }
+            if (str_ends_with($localA, $localB) || str_ends_with($localB, $localA)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * ITU calling codes, longest first so e.g. 966 wins over 96.
+     *
+     * @return list<string>
+     */
+    private static function countryCallingCodes(): array
+    {
+        static $codes = null;
+        if ($codes !== null) {
+            return $codes;
+        }
+
+        $codes = [
+            '966', '971', '973', '974', '965', '968', '962', '961', '964', '963', '967', '970', '972',
+            '880', '886', '852', '853', '855', '856', '880', '886', '880', '886',
+            '351', '352', '353', '354', '355', '356', '357', '358', '359', '370', '371', '372', '373',
+            '374', '375', '376', '377', '378', '380', '381', '382', '385', '386', '387', '389',
+            '420', '421', '423',
+            '212', '213', '216', '218', '220', '221', '222', '223', '224', '225', '226', '227', '228',
+            '229', '230', '231', '232', '233', '234', '235', '236', '237', '238', '239', '240', '241',
+            '242', '243', '244', '245', '246', '248', '249', '250', '251', '252', '253', '254', '255',
+            '256', '257', '258', '260', '261', '262', '263', '264', '265', '266', '267', '268', '269',
+            '290', '291', '297', '298', '299',
+            '44', '49', '33', '39', '34', '31', '32', '41', '43', '45', '46', '47', '48', '30', '36',
+            '60', '61', '62', '63', '64', '65', '66', '81', '82', '84', '86', '90', '91', '92', '93',
+            '94', '95', '98',
+            '1', '7', '20', '27',
+        ];
+
+        usort($codes, static fn (string $a, string $b): int => strlen($b) <=> strlen($a));
+
+        return $codes;
     }
 
     /**
